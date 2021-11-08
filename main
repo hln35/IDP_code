@@ -1,0 +1,352 @@
+#include <Wire.h>
+#include <Adafruit_MotorShield.h>
+#include "utility/Adafruit_MS_PWMServoDriver.h"
+#include <Servo.h>
+Servo servo;
+int servoPin = 10;
+int pos = 0;   // servo position in degrees
+
+
+
+
+Adafruit_MotorShield AFMS = Adafruit_MotorShield();
+Adafruit_DCMotor *myMotor3 = AFMS.getMotor(3);
+Adafruit_DCMotor *myMotor4 = AFMS.getMotor(4);
+Adafruit_DCMotor *myMotor1 = AFMS.getMotor(1);
+
+#define IR_SENSOR_RIGHT 11
+#define IR_SENSOR_LEFT 12
+
+int MOTOR_SPEED=255;
+
+int i = 0;
+int v = 0;
+
+//metal detector variables
+const byte npulse = 3;
+const byte pin_pulse=A0;
+const byte pin_cap  =A1;
+int metallight = 7;
+int non_metallight = 6;
+int diff_sum = 0;
+const int nmeas=256;  //measurements to take
+long int sumsum=0; //running sum of 64 sums
+long int skip=0;   //number of skipped sums
+long int diff=0;        //difference between sum and avgsum
+long int flash_period=0;//period (in ms)
+int magnet = 0;
+int box =0;
+
+void motorSpeed(int rightMotorSpeed, int leftMotorSpeed);
+
+
+void setup() {
+ 
+ 
+  AFMS.begin();
+  //Declare line sensors
+  pinMode(IR_SENSOR_RIGHT, INPUT);
+  pinMode(IR_SENSOR_LEFT, INPUT);
+  //servo
+  servo.attach(servoPin);
+  Serial.begin(9600);
+  //metal detector
+  pinMode(pin_pulse, OUTPUT);
+  digitalWrite(pin_pulse, LOW);
+  pinMode(pin_cap, INPUT);  
+  pinMode(metallight, OUTPUT);
+  pinMode(non_metallight, OUTPUT);
+ 
+}
+
+
+void loop()
+{
+
+  int rightIRSensorValue = digitalRead(IR_SENSOR_RIGHT);
+  int leftIRSensorValue = digitalRead(IR_SENSOR_LEFT);
+
+
+
+  //If none of the sensors detects white line, then go forward
+  if (rightIRSensorValue == LOW  && leftIRSensorValue == LOW)
+  {
+      motorSpeed(-MOTOR_SPEED, -MOTOR_SPEED);
+  }
+  //If right sensor detects white line, then turn left
+  else if (rightIRSensorValue == HIGH && leftIRSensorValue == LOW )
+  {
+      motorSpeed(MOTOR_SPEED, -MOTOR_SPEED);
+  }
+  //If left sensor detects white line, then turn right  
+  else if (rightIRSensorValue == LOW && leftIRSensorValue == HIGH )
+  {
+      motorSpeed(-MOTOR_SPEED, MOTOR_SPEED);
+  }
+  //If both the sensors detect white line, then increment count
+  else if ((rightIRSensorValue ==  HIGH) && ( leftIRSensorValue == HIGH))
+  {
+      i++;
+      // delay so program only adds 1 for passing a junction and not continously adding to i as it passes over the junction
+      motorSpeed(-MOTOR_SPEED, -MOTOR_SPEED);
+      delay(250);
+  }
+
+//when it reaches the collection area
+  while ( i == 3 && v == 0)
+  {
+    // at collection zone stop and reverse
+    motorSpeed(0,0);
+    delay(500);
+    motorSpeed(MOTOR_SPEED,MOTOR_SPEED);
+    delay(500);
+    motorSpeed(0,0);
+    // pick up box code
+    openClamp(-20);
+    delay(100);
+    motorDown(300);
+    delay(200);
+    closeClamp(20);
+    delay(100);
+    motorUp(950);
+    delay(500);
+    //METAL DETECTOR CODE START FROM HERE
+    for (int n; n < 20; n++){
+      int minval=1023;
+      int maxval=0;
+     
+      //perform measurement
+      long unsigned int sum=0;
+      for (int imeas=0; imeas<nmeas+2; imeas++){
+        //reset the capacitor
+        pinMode(pin_cap,OUTPUT);
+        digitalWrite(pin_cap,LOW);
+        delayMicroseconds(20);
+        pinMode(pin_cap,INPUT);
+        //apply pulses
+        for (int ipulse = 0; ipulse < npulse; ipulse++) {
+          digitalWrite(pin_pulse,HIGH); //takes 3 microseconds
+          delayMicroseconds(3);
+          digitalWrite(pin_pulse,LOW);  //takes 3 microseconds
+          delayMicroseconds(3);
+        }
+        //read the charge on the capacitor
+        int val = analogRead(pin_cap); //takes 13x8=104 microseconds
+        minval = min(val,minval);
+        maxval = max(val,maxval);
+        sum+=val;
+      }
+   
+      //subtract minimum and maximum value to remove spikes
+      sum-=minval; sum-=maxval;
+     
+      //process
+      if (sumsum==0) sumsum=sum<<6; //set sumsum to expected value
+      long int avgsum=(sumsum+32)>>6;
+      diff=sum-avgsum;
+      if (abs(diff)<avgsum>>10){      //adjust for small changes
+        sumsum=sumsum+sum-avgsum;
+        skip=0;
+      } else {
+        skip++;
+      }
+      if (skip>64){     // break off in case of prolonged skipping
+        sumsum=sum<<6;
+        skip=0;
+      }
+   
+      // one permille change = 2 ticks/s
+      if (diff==0) flash_period=1000000;
+      else flash_period=avgsum/(4*abs(diff));    
+       
+      if (diff < 0){
+        diff_sum += diff;  // adding the difference in signal so that we can detect smaller change
+      }
+      else if(diff == 0){ // reset diff_sum
+        diff_sum = 0;};
+   
+      if (diff_sum < -500) { //found metal
+        Serial.println("Hey I found some metal!");
+        digitalWrite(metallight, HIGH);
+        digitalWrite(non_metallight, LOW);
+        magnet = 0;
+      }
+      else if(diff_sum > -500) { //not found metal
+        digitalWrite(metallight, LOW);
+        digitalWrite(non_metallight, HIGH);
+        magnet = 1;
+      };
+      }
+    //end of metal detector  
+   
+   
+    //180 turn
+    motorSpeed(MOTOR_SPEED,-MOTOR_SPEED);
+    delay(3100);
+    v++;
+   
+  }
+
+
+ while( i == 4 && v == 1)
+ {
+  // depending on whether box has metal turn function will drop into correct square box and return back to the white line
+  turn( magnet);
+  box++;
+  v++;
+ }
+
+ if (box != 6)
+ {
+  // if the box is not the sixth one the robot will turn 180 and head towards collection zone
+  v = 0;
+  i = 2;
+  motorSpeed(MOTOR_SPEED,-MOTOR_SPEED);
+  delay(3100);
+ }
+
+ while ( i == 5 && v == 2 && box == 6)
+ {
+  // After 6 boxes it will drive into start square
+  motorSpeed(-MOTOR_SPEED, -MOTOR_SPEED);
+  delay(1500);
+  while(1){
+    // stop in start box indefinetly
+  motorSpeed(0,0);
+  }
+ 
+ }
+}
+ 
+ 
+
+
+void motorSpeed(int rightMotorSpeed, int leftMotorSpeed)
+{
+ // function sets speeds of left and right motor
+  if (rightMotorSpeed < 0)
+  {
+    myMotor4->setSpeed(MOTOR_SPEED);
+    myMotor4->run(BACKWARD);  
+  }
+  else if (rightMotorSpeed > 0)
+  {
+    myMotor4->setSpeed(MOTOR_SPEED);
+    myMotor4->run(FORWARD);      
+  }
+  else
+  {
+    myMotor4->run(RELEASE);      
+  }
+
+  if (leftMotorSpeed < 0)
+  {
+    myMotor3->setSpeed(MOTOR_SPEED);
+    myMotor3->run(BACKWARD);  
+  }
+  else if (leftMotorSpeed > 0)
+  {
+    myMotor3->setSpeed(MOTOR_SPEED);
+    myMotor3->run(FORWARD);      
+  }
+  else
+  {
+    myMotor3->run(RELEASE);        
+  }
+     
+}
+
+void motorUp(int period)
+{
+  // function lifts clamp up
+  myMotor1->setSpeed(255);
+ 
+  myMotor1->run(BACKWARD);
+  delay(period);
+  myMotor1->run(RELEASE);
+  }
+void motorDown(int period)
+{
+ 
+  // function lifts clamp down
+  myMotor1->setSpeed(255);
+ 
+  myMotor1->run(FORWARD);
+  delay(period);
+  myMotor1->run(RELEASE);
+  }  
+void openClamp(int pos)
+{
+  // fuction onpen clamp
+   for (pos; pos <= 180; pos += 1) { // goes from pos degrees to 180 degrees
+    // in steps of 1 degree
+    servo.write(pos);              // tell servo to go to position in variable 'pos'
+    delay(15);                       // waits 15 ms for the servo to reach the position
+  }}
+void closeClamp(int pos)
+{
+   for (int i = 180; i >= pos; i -= 1) { // goes from 180 degrees to pos degrees
+    // in steps of 1 degree
+    servo.write(i);              // tell servo to go to position in variable 'i'
+    delay(15);                       // waits 15 ms for the servo to reach the position
+  }}
+
+
+void turn( int magnet)
+{
+
+  if(magnet == 0)
+  {
+  // if metal in box it will pause
+  motorSpeed(0,0);
+  delay(500);
+  //turn into red square
+  motorSpeed(MOTOR_SPEED,-MOTOR_SPEED);
+  delay(1125);
+  motorSpeed(-MOTOR_SPEED,-MOTOR_SPEED);
+  delay(350);
+  //stop
+  motorSpeed(0,0);
+  delay(500);
+  // drop box
+  motorDown(300);
+  delay(100);
+ 
+  openClamp(25 );
+  delay(200);
+  motorUp(950);
+  //reverse back onto white line
+  motorSpeed(MOTOR_SPEED,MOTOR_SPEED);
+  delay(350);
+  motorSpeed(-MOTOR_SPEED,MOTOR_SPEED);
+  delay(1050);
+  }
+
+  else
+  {
+  // metal not present
+  motorSpeed(0,0);
+  delay(500);
+  //turn into blue square
+  motorSpeed(-MOTOR_SPEED,MOTOR_SPEED);
+  delay(1125);
+  motorSpeed(-MOTOR_SPEED,-MOTOR_SPEED);
+  delay(350);
+  //stop
+  motorSpeed(0,0);
+  delay(500);
+  // drop box
+  motorDown(300);
+  delay(100);
+ 
+  openClamp(25 );
+  delay(200);
+  motorUp(950);
+  //reverse back onto white line
+  motorSpeed(MOTOR_SPEED,MOTOR_SPEED);
+  delay(350);
+  motorSpeed(MOTOR_SPEED,-MOTOR_SPEED);
+  delay(1050);
+  }
+ 
+}
